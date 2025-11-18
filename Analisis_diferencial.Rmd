@@ -1,0 +1,520 @@
+---
+title: "Pipeline reproducible análisis de expresión diferencial"
+author: "Enrique_Carnerero_Bocanegra"
+date: "2025-11-13"
+output: 
+  html_document:
+    toc: TRUE
+    number_sections: TRUE
+    toc_float: TRUE
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Reset the environment
+rm(list=ls())
+
+# Directory containing the data
+path <- "C:/Users/ecarb/OneDrive/Escritorio/Training verano/Analisis de expresión diferencial/"
+setwd(path)
+```
+
+
+Clarification: This code is part of a practice exercise I carried out to train differential expression analysis. It is not intended to obtain biological results or conclusions.
+
+
+
+# Differential expression analysis
+
+## Libraries
+```{r libraries, echo = FALSE, message=FALSE, warning=FALSE}
+#Libraries
+library(DESeq2)
+library(dplyr)
+library(purrr)
+library(tibble)
+library(ggplot2)
+library(tximport)
+library(txdbmaker)
+library(biomaRt)
+library(AnnotationDbi)
+library(GenomicFeatures)
+library(pheatmap)
+library(RColorBrewer)
+library(AnnotationHub)
+library(ensembldb)
+library(org.Mm.eg.db)
+library(clusterProfiler)
+library(DOSE)
+library(pathview)
+
+```
+
+We will use a dataset extracted from Kaggle. This dataset contains RNA-Seq reads from the mouse hippocampus at two ages (1 month and 4 months), with three biological replicates per condition.
+
+A quality analysis of the reads will be performed (FastQC in Galaxy), followed by gene expression quantification using Salmon, and subsequently a differential expression analysis will be carried out with DESeq2.
+
+
+## Data after quantification with Salmon
+
+```{r data 1,warning=FALSE, echo=FALSE}
+
+
+files <- list.files(path = 'C:/Users/ecarb/OneDrive/Escritorio/Training verano/Analisis de expresión diferencial/samples', full.names = T, pattern = 'tabular')
+names(files) <- c("1mo_Rep1","1mo_Rep2","1mo_Rep3","4mo_Rep1","4mo_Rep2","4mo_Rep3")
+
+
+```
+
+
+We create a tx2genes file from the annotation downloaded from gencodegenes.org and select the data that will be used.
+
+
+```{r data 2,warning=FALSE, echo=FALSE, message=FALSE}
+
+file_gtf <- "gencode.vM30.region.gtf"
+
+txdb<- makeTxDbFromGFF(file_gtf, format= "gtf")
+
+#Extraction of the table
+
+k <- keys(txdb, keytype = "TXNAME")
+tx2gene<- AnnotationDbi::select(txdb, keys = k, 
+                                keytype = "TXNAME",
+                                columns = "GENEID")
+
+#Add gene symbols using biomaRt
+mart<- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+annot<- getBM(attributes = c("ensembl_gene_id", "external_gene_name"),
+              mart = mart)
+
+
+colnames(annot)<- c("gene_id", "gene_name")
+colnames(tx2gene)<- c("transcript_id", "gene_id")
+
+#Adjust the gene_id in tx2gene
+tx2gene$gene_id_clean <- sub("\\..*$", "", tx2gene$gene_id)
+tx2gene$gene_id<- tx2gene$gene_id_clean
+tx2gene$gene_id_clean<- NULL
+
+
+tx2gene2 <- left_join(tx2gene, annot, by="gene_id")
+
+
+txi <- tximport(files, type="salmon", tx2gene=tx2gene2[,c("transcript_id", "gene_id")], countsFromAbundance="lengthScaledTPM")
+data <- round(txi$counts)
+
+```
+
+## Metadata
+
+
+```{r metadata ,warning=FALSE, echo=FALSE}
+
+
+metadata <- read.csv("metadata.tsv", sep="\t")
+metadata$Age <- metadata$Run
+metadata$Run<- NULL
+
+```
+
+# Differential expression analysis with DESeq.
+
+```{r analysis ,warning=FALSE, echo=FALSE, message=FALSE}
+
+all(trimws(colnames(txi$counts)) == trimws(as.character(rownames(metadata))))
+
+#Create the dds object
+dds <- DESeqDataSetFromTximport(txi, colData = metadata,
+                                design = ~ Age)
+
+##View(counts(dds))
+
+#Median-of-ratios normalization. This step is usually performed automatically by DESeq().
+dds <- estimateSizeFactors(dds)
+
+#We check the normalization factors.
+##sizeFactors(dds)
+
+#We retrieve the count matrix, this time normalized.
+norm_counts<- counts(dds, normalized = TRUE) %>% 
+                data.frame()%>%
+                rownames_to_column((var="gene"))
+
+
+```
+
+
+## Exploratory data analysis of the data.
+
+```{r PCAplot ,warning=FALSE, echo=FALSE, message=FALSE}
+
+rld <- rlog(dds, blind = TRUE)
+plotPCA(rld,
+        intgroup = 'Age')
+
+
+
+```
+
+The PCA shows that the samples are well separated according to their groups, indicating that age is the main factor explaining variation in gene expression in the mouse hippocampus.
+
+To confirm this, an exploratory heatmap is generated.
+
+
+```{r Heatmap 1 ,warning=FALSE, echo=FALSE}
+
+rld_mat<- assay(rld)
+rld_cor <- cor(rld_mat)
+
+
+pheatmap(rld_cor,
+         annotation = metadata)
+
+```
+
+
+The heatmap shows that the groups defined by the metadata are well separated, indicating that the age is the main factor driving the differential gene expression in our region. 
+The colors indicate high levels in the correlation within each group, showing excellent biological reproducibility and technical consistency between samples.
+
+
+## Run DESeq2 differential expression analysis
+
+```{r DESeq2 ,warning=FALSE, echo=FALSE, message=FALSE}
+
+dds <- DESeq(dds)
+
+
+#Plot dispersion estimates
+plotDispEsts(dds)
+
+```
+
+
+## Contrast between 1_month and 4_month
+
+```{r Contrast ,warning=FALSE, echo=FALSE, message=FALSE}
+
+contrast <- c("Age", "4_Month", "1_Month")
+
+#Wald test
+res<- results(dds,
+              contrast = contrast,
+              alpha = 0.5)
+
+
+#Shrink the log2 fold changes to be more accurate
+res <- lfcShrink(dds,
+                 coef = "Age_4_Month_vs_1_Month",
+                 type = "apeglm")
+
+```
+
+## Main results
+
+
+```{r Main results ,warning=FALSE, echo=FALSE}
+
+#Set threshold
+padj.cutoff <- 0.05
+
+res_tbl <- res %>%
+          data.frame()%>%
+          rownames_to_column(var='gene')%>%
+          as_tibble()
+
+#Main results
+sig_res <- dplyr::filter(res_tbl,
+                          padj < padj.cutoff)
+
+```
+
+
+Five genes are found to be differentially expressed in 4-month-old mice compared to 1-month-old mice.
+
+## Aditional visualizations
+
+### Volcano Plot
+
+```{r Volcano ,warning=FALSE, echo=FALSE}
+
+# Volcano plot
+res_volcano <- res_tbl %>%
+                      mutate(threshold = padj < 0.05 & abs(log2FoldChange) >= 0.58)
+
+
+ggplot(res_volcano)+
+  geom_point(aes(x=log2FoldChange, y= -log10(padj), colour = threshold))+
+  ggtitle("Differential Expression: 4_month VS 1_month")+
+  xlab("log2 Fold Change")+
+  ylab("-log10 Adjusted p-value")+
+  scale_colour_manual(values = c("grey", "red"))+
+  theme(legend.position = "none",
+        plot.title = element_text(size = rel(1.5), hjust = 0.5),
+        axis.title = element_text(size= rel(1.25)))
+
+
+```
+
+
+### Heatmap
+
+
+```{r Heatmap 2 ,warning=FALSE, echo=FALSE, message=FALSE}
+
+vM30annot<- tx2gene2 %>%
+                    dplyr::select(gene_id,gene_name)%>%
+                    dplyr::distinct()
+
+
+norm_counts <- merge(norm_counts, vM30annot, by.x = "gene", by.y="gene_id")
+
+
+#There is a problem with the names in the metadata and the matrix, as they do not match.
+colnames(norm_counts)[2:7]
+rownames(metadata)
+
+nombres_correct <- sub( "^X", "", colnames(norm_counts)[2:7])
+colnames(norm_counts)[2:7] <- nombres_correct
+
+#We create a heatmap of the significant genes.
+norm_sig <- norm_counts %>%
+                        dplyr::filter(gene %in% sig_res$gene)
+
+norm_sig<- norm_sig %>%
+              tibble::column_to_rownames(var="gene_name")
+
+heat_color<- brewer.pal(6,"YlOrRd")
+
+
+pheatmap(norm_sig[2:7],
+         cluster_rows = T,
+         color = heat_color,
+         annotation = metadata,
+         fontsize = 10,
+         scale = "row")
+```
+
+Genomic annotation studies were performed for the analysis of the differentially expressed genes.
+
+## Gene Annotation (GSEA)
+
+```{r GSEA ,warning=FALSE, echo=FALSE, message=FALSE}
+
+ah <- AnnotationHub()
+
+#unique(ah$species)
+#unique(ah$rdataclass)
+
+mus_ens <- query(ah, c("Mus Musculus", "EnsDb"))
+mus_ens
+
+mus_ens <- mus_ens[["AH119358"]]
+
+
+#Create a gene-level dataframe
+annotations_ahb <- genes(mus_ens, return.type = "data.frame")%>%
+    dplyr::select(gene_id, gene_name, entrezid, gene_biotype)%>%
+    dplyr::filter(gene_id %in% res_tbl$gene)
+
+
+
+annotations_ahb$entrezid <- map(annotations_ahb$entrezid,1) %>%  unlist()
+
+# Determine the indices for the non-duplicated genes
+non_duplicates_idx <- which(duplicated(annotations_ahb$gene_name) == FALSE)
+
+# Return only the non-duplicated genes using indices
+annotations_ahb <- annotations_ahb[non_duplicates_idx, ]
+
+# Determine how many of the Entrez column entries are NA
+which(is.na(annotations_ahb$entrezid)) %>%  length()
+
+
+#Eliminamos los NA y juntamos las tablas resultado y annotation
+res_tbla_noNA <- dplyr::filter(res_tbl, padj != "NA")
+
+res_ids <- left_join(res_tbla_noNA, annotations_ahb, by=c("gene" = "gene_id"))
+
+
+##Como tenemos únicamente 5 genes relevantes, hacemos un análisis funcional mendiante puntuación de clases funcionales
+### Remove any Entrez duplicates and NA
+res_entrez <- res_ids %>%
+  filter(!is.na(entrezid)) %>%       
+  filter(!duplicated(entrezid))
+
+## Extract the foldchanges
+foldchanges <- res_entrez$log2FoldChange
+
+## Name each fold change with the corresponding Entrez ID
+names(foldchanges) <- res_entrez$entrezid
+
+## Sort fold changes in decreasing order
+foldchanges <- sort(foldchanges, decreasing = TRUE)
+
+##Run GSEA
+###search_kegg_organism("mus")
+
+set.seed(2002)
+gseaKEGG <- gseKEGG(geneList = foldchanges,
+                    organism = "mmu",
+                    minGSSize = 5,
+                    pvalueCutoff = 0.05,
+                    verbose = FALSE)
+
+
+gseaKEGG_res <- gseaKEGG@result
+
+
+gseaKEGG_gene_name <- setReadable(gseaKEGG, OrgDb = org.Mm.eg.db, keyType = "ENTREZID")
+
+##Plot de GSEA for the pathway
+gseaplot(gseaKEGG, geneSetID = "mmu01100")
+
+
+
+``` 
+
+There are no results with an adjusted p-value of 0.05, which is required for significance, so it will be increased to 0.5, even though the results are not truly significant, as this is a practice exercise.
+
+Note: For biologically and statistically meaningful results, the adjusted p-value should be 0.05 or lower.
+
+The GO analysis will also be performed using a p-value cutoff of 0.5 for practice purposes.
+
+## Gene Annotation (GO) -> Biological Process
+
+
+```{r BP ,warning=FALSE, echo=FALSE, message=FALSE}
+
+## Create background dataset for hypergeometric testing using all tested genes for significance in the results                 
+all_genes <- as.character(res_ids$gene)
+
+##Convertimos a ENTREZID
+all_genes <- mapIds(org.Mm.eg.db,
+                    keys = all_genes,
+                    column = "ENTREZID",
+                    keytype = "ENSEMBL",
+                    multiVals = "first")%>%
+  na.omit() %>% unique()
+
+
+
+
+sig_gene <- res_ids %>%
+  dplyr::filter(padj<0.5)%>%
+  dplyr::pull(gene)
+
+## Lo pasamos también a ENTREZID
+sig_entrez <- mapIds(org.Mm.eg.db,
+                    keys = sig_gene,
+                    column = "ENTREZID",
+                    keytype = "ENSEMBL",
+                    multiVals = "first")%>%
+  na.omit() %>% unique()
+
+## Run GO enrichment analysis 
+
+###Biological Process
+ego <- enrichGO(
+    gene = sig_entrez,
+    universe = all_genes,
+    keyType = "ENTREZID",
+    OrgDb = org.Mm.eg.db,
+    ont = "BP",
+    pAdjustMethod = "BH",
+    pvalueCutoff = 0.5,  #Valor permisivo
+    qvalueCutoff = 0.5, #Valor permisivo
+    minGSSize = 3,
+    readable = TRUE
+)
+
+
+## Output results from GO analysis to a table
+cluster_summary <- data.frame(ego)
+
+##Dotplot
+dotplot(ego, showCategory=50)
+
+##Gráfico de enriquecimineto GO
+ego <- enrichplot::pairwise_termsim(ego)
+emapplot(ego, showCategory = 50)
+
+
+##Gráfico de red de categorías
+sig_foldchanges <- sig_res$log2FoldChange
+names(sig_foldchanges) <- sig_res$gene
+
+cnetplot(ego, 
+         showCategory = 5, 
+         color.params=list(foldChange=OE_foldchanges),
+         vertex.label.font=6)
+
+
+```
+
+
+## Gene Annotation (GO) -> Molecular Function
+
+
+
+``` {r ML ,warning=FALSE, echo=FALSE}
+###Molecular Function
+ego_MF <- enrichGO(
+    gene = sig_entrez,
+    universe = all_genes,
+    keyType = "ENTREZID",
+    OrgDb = org.Mm.eg.db,
+    ont = "MF",  #molecular function
+    pAdjustMethod = "BH",
+    pvalueCutoff = 0.5,  #Valor permisivo
+    qvalueCutoff = 0.5, #Valor permisivo
+    minGSSize = 3,
+    readable = TRUE
+)
+
+
+summary_MF <- data.frame(ego_MF)
+
+##Gráfico de enriquecimineto GO
+ego_MF <- enrichplot::pairwise_termsim(ego_MF)
+emapplot(ego_MF, showCategory = 50)
+
+```
+
+
+## Gene Annotation (GO) -> Cellular Component
+
+
+```{r CC ,warning=FALSE, echo=FALSE}
+### Cellular Component
+ego_CC <- enrichGO(
+    gene = sig_entrez,
+    universe = all_genes,
+    keyType = "ENTREZID",
+    OrgDb = org.Mm.eg.db,
+    ont = "CC",  
+    pAdjustMethod = "BH",
+    pvalueCutoff = 0.5,  #Valor permisivo
+    qvalueCutoff = 0.5, #Valor permisivo
+    minGSSize = 3,
+    readable = TRUE
+)
+
+summary_CC <- data.frame(ego_CC)
+
+##Gráfico de enriquecimineto GO
+ego_CC <- enrichplot::pairwise_termsim(ego_CC)
+emapplot(ego_CC, showCategory = 50)
+
+
+```
+
+
+You can see the versions of R and the packages used by sessionInfo()
+
+```{r sessionInfo ,warning=FALSE, echo=FALSE}
+
+#sessionInfo()
+```
